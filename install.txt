@@ -1,0 +1,175 @@
+
+NAS:
+- credentials -> Users
+  - creo usuario camaras
+  Home Directory:/mnt/PANAS/piedras/fotos/camaras
+  Shell:/usr/sbin/nologin
+  Password Disabled:No
+  Lock User:No
+  Samba Authentication:Yes
+  SSH:Password login enabled
+  Password Change Required:No
+
+
+- como cree la carpeta camaras entrando por SFTP, es del usuario camaras:camaras
+eso esta ok para que el SF pueda grabar
+, pero como que se puedan ver desde samba (con usuario "usuario"), Agregar usuario al grupo camaras
+
+desde NAS Credentials → Local Users
+edito usuario "usuario"
+"Auxiliary Groups", agrego "camaras" y grabar
+
+
+Por Shell (System Settings → Shell):
+sudo chmod -R 770 "/mnt/PANAS/piedras/fotos/camaras"
+
+
+UBUNTU
+
+\\192.168.1.30\piedras\fotos\descarga
+
+
+creo directorios para montar nas
+sudo mkdir -p /mnt/nas/fotos/origen/{FAMILIA,ZIPLINE,TUBING,BOSQUE,IGLU,INFANTIL,MUÑECO,"SILLA EST","SILLA 1","PISTA 3","PISTA 4","PISTA 5"}
+sudo chown -R $USER:$USER /mnt/nas/fotos/origen/
+sudo chmod -R 755 /mnt/nas/fotos/origen/
+
+sudo mkdir -p /mnt/nas/fotos/destino
+
+Instalar el cliente CIFS
+sudo apt update
+sudo apt install cifs-utils
+
+
+Montar a mano para probar, despues ira persostente en fstab
+sudo mount -t cifs "//192.168.1.30/piedras/fotos/descarga" /mnt/nas/fotos/destino \
+  -o username=usuario,password=oletna2021,uid=$(id -u),gid=$(id -g),vers=3.0
+
+Verificar que funcionó
+
+mount | grep piedras
+ls /mnt/nas/fotos/destino
+touch /mnt/nas/fotos/destino/test.txt   # confirma que también podés escribir
+
+Desmontar cuando termines la prueba
+
+sudo umount /mnt/nas/fotos/destino
+
+Un tip para cuando pases esto a /etc/fstab (permanente)
+
+No pongas la contraseña en texto plano ahí — usá un archivo de credenciales aparte:
+sudo nano /etc/nas-credentials-destino
+username=usuario
+password=oletna2021
+
+
+sudo nano /etc/nas-credentials-origen
+username=camaras
+password=oletna2021
+
+
+sudo chmod 600 /etc/nas-credentials-destino
+sudo chmod 600 /etc/nas-credentials-origen
+sudo chown root:root /etc/nas-credentials-destino
+sudo chown root:root /etc/nas-credentials-origen
+
+sudo nano /etc/fstab
+//192.168.1.30/piedras/fotos/descarga  /mnt/nas/fotos/destino  cifs  credentials=/etc/nas-credentials-destino,uid=1000,gid=1000,_netdev,vers=3.0  0  0
+//192.168.1.30/piedras/fotos/camaras  /mnt/nas/fotos/origen  cifs  credentials=/etc/nas-credentials-origen,uid=hach,gid=hach,_netdev,vers=3.0,iocharset=utf8  0  0
+
+
+Aplicar y probar
+sudo mount -a
+
+mount | grep destino
+touch /mnt/nas/fotos/destino/test.txt && rm /mnt/nas/fotos/destino/test.txt
+
+
+
+
+Instalo photo_batcher en un entorno virtual venv
+Crear el venv e instalar Pillow
+sudo mkdir -p /opt/photo_batcher
+sudo chown hach:hach /opt/photo_batcher
+
+sudo -u hach python3 -m venv /opt/photo_batcher/venv
+sudo -u hach /opt/photo_batcher/venv/bin/pip install --upgrade pip
+sudo -u hach /opt/photo_batcher/venv/bin/pip install Pillow
+
+Verificar:
+/opt/photo_batcher/venv/bin/python3 -c "import PIL; print(PIL.__version__)"
+
+
+Creo directorio logs
+mkdir -p /opt/photo_batcher/logs
+
+Copiar el script al venv
+sudo cp photo_batcher.py /opt/photo_batcher/
+sudo chown hach:hach /opt/photo_batcher/photo_batcher.py /opt/photo_batcher/logs
+
+Instalar y arrancar el servicio
+
+sudo cp photo-batcher.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable photo-batcher
+sudo systemctl start photo-batcher
+sudo systemctl status photo-batcher
+
+
+
+PRUEBA manual
+
+
+creo directorio "test"
+sudo mkdir -p /mnt/nas/fotos/origen/test
+
+veo alguna foto existente
+ll /mnt/nas/fotos/destino/2026-08-01/BOSQUE/1045\ Hs/001.jpg
+
+
+
+# subí una foto real por SFTP a la cámara1 (o simulá con sftp manual)
+sftp camaras@192.168.1.30
+cd camara1
+put alguna_foto.jpg
+exit
+
+# mirá que aparezca en el mount del Ubuntu
+ls /mnt/nas/fotos/origen/camara1/
+
+# esperá el TIME_LIMIT_MIN (5 min por default) o subí 20 fotos para el trigger por cantidad
+# y despues confirmá que se proceso:
+sudo journalctl -u photo-batcher -f
+
+
+Configuracion Camara, SFTP
+Crear conexion FTP y ponerle nombre del tema y seleccionar carpeta del tema
+
+1) Menu Red
+2) Conectar al servidor FTP
+3) Ajustes de Red
+- Crear perfil
+- Configurar manualmente
+- General
+  - Nombre de perfil, poner el tema
+- Inalambrico
+  - SSID poner el SSID de la red wifi
+  - Autenticacion/cifrado: WPA2-PSK
+  - Contraseña: la del wifi
+- FTP
+  - Tipo servidor: SFTP
+  - Direccion: 192.168.1.30
+  - Carpeta: <nombre tema>  (respetar mayusculas)
+  - Puerto: 22
+  - Inicio sesion anonimo : OFF
+  - identidad de usuario: camaras
+  - contraseña: oletna2021
+
+Opciones:
+marcar:
+
+"Carga automatica"
+"Mantener conexion"
+"Sobreescribir si mismo nombre"
+"Proteger si marcados para descargar"
+

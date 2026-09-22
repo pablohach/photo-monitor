@@ -1,0 +1,19 @@
+[Unit]
+Description=Photo Batcher - mueve fotos por lote desde NAS origen a NAS destino
+# Espera a que la red y los mounts del NAS esten listos antes de arrancar
+After=network-online.target remote-fs.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/nas/fotos/origen /mnt/nas/fotos/destino
+
+
+[Service]
+Type=simple
+ExecStart=/opt/photo_batcher/venv/bin/python3 /opt/photo_batcher/photo_batcher.py
+Restart=on-failure
+RestartSec=10
+# Reemplazar por el usuario que tenga permisos de lectura/escritura sobre los mounts
+User=hach
+Group=hach
+
+[Install]
+WantedBy=multi-user.target

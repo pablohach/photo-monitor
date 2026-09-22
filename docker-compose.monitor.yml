@@ -1,0 +1,25 @@
+# Agregar este servicio a tu docker-compose.yml existente (o correrlo standalone
+# con `docker compose -f docker-compose.monitor.yml up -d`).
+#
+# No necesita estar en la misma red que nginx-proxy-manager: alcanza con publicar
+# el puerto en el host, y en NPM crear un Proxy Host apuntando a
+# http://<ip-lan-del-ubuntu>:8080 (misma logica que usarias para cualquier otro
+# servicio que corre directo en el host).
+
+services:
+  photo-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    container_name: photo-monitor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Bind mount de solo lectura: el monitor nunca necesita escribir aca
+      - /mnt/nas/fotos/origen:/data/origen:ro
+    environment:
+      - SRC_DIR=/data/origen
+      - STALE_WARN_MIN=2
+      - STALE_ALERT_MIN=5
+      - REFRESH_SEC=4
