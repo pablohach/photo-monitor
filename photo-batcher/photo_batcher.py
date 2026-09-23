@@ -2,55 +2,52 @@
 """
 photo_batcher.py
 
-Monitorea SRC_DIR, que contiene subdirectorios (uno por camara/origen, etc).
-Cada subdirectorio se trackea de forma INDEPENDIENTE: cuando en ese
-subdirectorio se junta MAX_COUNT fotos o pasan TIME_LIMIT_MIN minutos desde
-que aparecio la primera foto pendiente (lo que ocurra primero), se procesa
-el lote de ESE subdirectorio.
+Monitorea SRC_DIR, que contiene subdirectorios (uno por camara/tema, etc).
+Cada foto se procesa y se sube a destino DE FORMA INMEDIATA en cuanto se
+detecta que esta estable (termino de subir por SFTP) y valida (sin corrupcion,
+duplicado descartado y correspondiente al dia de hoy).
 
-Al procesar un lote de un subdirectorio "camara1":
-  DST_DIR/yyyy-mm-dd/camara1/HHmm Hs/
-      001.jpg      001_#T.jpg (thumb THUMB_SIZE)   001_#V.jpg (visual VISUAL_SIZE)
-      002.jpg      002_#T.jpg                       002_#V.jpg
+Estructura generada en DST_DIR:
+  DST_DIR/yyyy-mm-dd/<camara>/HHmm Hs/
+      0001.jpg      0001_#T.jpg (thumb THUMB_SIZE)   0001_#V.jpg (visual VISUAL_SIZE)
+      0002.jpg      0002_#T.jpg                       0002_#V.jpg
       ...
 
-La carpeta "HHmm Hs" usa la hora de la PRIMERA foto detectada en el lote
-(no la hora en que se dispara el procesamiento). Si ya existe, se le suma
-1 minuto hasta encontrar una libre (si cruza medianoche, la fecha se ajusta
-sola).
+Asignacion de carpetas horarias (HHmm Hs):
+  a) Si la ultima carpeta tiene menos de MAX_COUNT fotos y no supero el
+     tiempo de inactividad (FOLDER_TIMEOUT_MIN), se guarda ahi con el
+     siguiente numero correlativo.
+  b) Si la ultima carpeta alcanzo MAX_COUNT fotos o pasaron mas de
+     FOLDER_TIMEOUT_MIN minutos de inactividad (si FOLDER_TIMEOUT_MIN > 0),
+     se crea una nueva carpeta con la hora actual (ej: "1258 Hs") y se
+     continua la numeracion correlativa del dia.
+  c) Si todavia no existe ninguna carpeta hoy, se crea con la hora actual y
+     se comienza desde la foto 1 (ej: 0001.jpg).
 
-Los jpg con tag EXIF de orientacion se rotan fisicamente al generarse.
+Formato de fotos:
+  - Cantidad de digitos configurable mediante FILENAME_DIGITS (ej: 4 -> 0001.jpg).
+  - Los jpg con tag EXIF de orientacion se rotan fisicamente al generarse.
+  - Formatos RAW (cr2, nef, etc) no se procesan con Pillow: se mueven
+    renombrados (0001.cr2) sin generar thumb/visual.
 
-Formatos RAW (cr2, nef, etc) no se pueden procesar con Pillow: se mueven
-renombrados (001.cr2) pero sin generar thumb/visual.
+DETECCION DE DUPLICADOS POR TRANSFERENCIA CORTADA:
+  Cuando la camara reintenta subir un archivo cuyo nombre ya existe en el
+  servidor (por un corte de WiFi a mitad de subida), sube una copia con sufijo
+  "-N" (ej: DSC_0818.JPG y DSC_0818-1.JPG). Se detectan estos grupos, se
+  conserva la version de mayor tamano (la que llego completa) y se envian
+  las demas a QUARANTINE_DIR.
 
-DETECCION DE DUPLICADOS POR TRANSFERENCIA CORTADA: cuando la camara reintenta
-subir un archivo cuyo nombre ya existe en el servidor (por un corte de WiFi a
-mitad de subida), sube una copia con sufijo "-N" (ej: DSC_0818.JPG y
-DSC_0818-1.JPG). El script detecta estos grupos, se queda con la version de
-mayor tamano (la que llego completa) y manda la otra a QUARANTINE_DIR para
-revision manual, en vez de procesar ambas como fotos distintas.
+DETECCION DE ARCHIVOS CORRUPTOS/TRUNCADOS:
+  Se valida que cada imagen se pueda decodificar por completo; si esta
+  incompleta o corrupta, se borra directamente.
 
-DETECCION DE ARCHIVOS CORRUPTOS/TRUNCADOS: incluso sin un "-1" de por medio,
-un archivo puede quedar truncado para siempre (la camara nunca reintento).
-Se valida que cada JPEG/PNG/etc se pueda decodificar por completo; si no,
-se borra directamente (no tiene ningun uso guardar una foto ilegible).
+LIMPIEZA POR FECHA:
+  Si un archivo estable no corresponde al dia de HOY, se borra en vez de
+  mezclarlo con las fotos del dia actual.
 
-LIMPIEZA POR FECHA: si un archivo estable no corresponde al dia de HOY (por
-ejemplo, quedo trabado de una sesion anterior y nunca se proceso), se borra
-en vez de mezclarlo con el lote del dia actual.
-
-ESTABILIDAD SIN BLOQUEO: is_stable() no usa time.sleep(). Trackea el tamano
-de cada archivo en cada vuelta del loop principal (que ya corre cada
-POLL_INTERVAL_SEC) y calcula cuanto tiempo real paso desde que dejo de
-cambiar de tamano. Esto evita que procesar un lote grande (ej. 100 fotos)
-tarde varios minutos solo en checks de estabilidad.
-
-FIX carpetas vacias: el trigger por tiempo/cantidad ahora solo cuenta
-archivos ya CONFIRMADOS estables (antes, un archivo solo, sin duplicado,
-contaba para el lote aunque siguiera subiendose). Si al cumplirse el tiempo
-limite no hay ningun archivo realmente listo, no se crea ninguna carpeta:
-se loguea una advertencia y se reinicia el timer.
+ESTABILIDAD SIN BLOQUEO:
+  is_stable() no usa time.sleep(). Trackea el tamano de cada archivo en cada
+  vuelta del loop principal y calcula el tiempo transcurrido sin cambios.
 """
 
 import os
@@ -68,9 +65,15 @@ from PIL import Image, ImageOps
 SRC_DIR = "/mnt/nas/fotos/origen"  # contiene subdirectorios (camara1, camara2, ...)
 DST_DIR = "/mnt/nas/fotos/destino"
 
-TIME_LIMIT_MIN = 20  # minutos maximos de espera antes de mover el lote
-MAX_COUNT = 100  # cantidad maxima de fotos antes de mover el lote
-POLL_INTERVAL_SEC = 5  # cada cuanto se revisa el directorio
+MAX_COUNT = (
+    100  # cantidad maxima de fotos por carpeta horaria (al llenarse se crea una nueva)
+)
+FOLDER_TIMEOUT_MIN = 30  # minutos de inactividad para crear nueva carpeta aunque no este llena (0 = deshabilitado)
+FILENAME_DIGITS = (
+    4  # cantidad de digitos para el numero de foto (ej: 4 -> 0001.jpg, 3 -> 001.jpg)
+)
+
+POLL_INTERVAL_SEC = 5  # cada cuanto se revisa el directorio de origen
 STABLE_WAIT_SEC = 3  # segundos reales sin cambio de tamano para considerar
 # un archivo "terminado de subir" (sin bloquear el loop)
 
@@ -87,12 +90,16 @@ ALL_EXTENSIONS = PIL_EXTENSIONS | OTHER_EXTENSIONS
 
 # Directorio donde se mueven los archivos "perdedores" cuando se detectan
 # duplicados con sufijo -N (ej: DSC_0818.JPG y DSC_0818-1.JPG), tipicos de
-# una transferencia SFTP cortada y reintentada por la camara. Se organiza
-# en subcarpetas por camara, para revision manual si hace falta.
+# una transferencia SFTP cortada y reintentada por la camara.
 QUARANTINE_DIR = "/mnt/nas/fotos/sospechosos"
 
 LOG_FILE = "/opt/photo_batcher/logs/photo_batcher.log"
 # ---------------------------------------------------------------------------
+
+try:
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+except Exception:
+    pass
 
 logging.basicConfig(
     filename=LOG_FILE,
@@ -130,8 +137,8 @@ def is_stable(path):
 
 def refresh_stability(files):
     """Actualiza el historial de tamanios para una lista de archivos. Se
-    llama en cada poll, independientemente de si ya toca procesar el lote,
-    para que la estabilidad se vaya resolviendo en el tiempo (sin sleep)."""
+    llama en cada poll para que la estabilidad se vaya resolviendo en el
+    tiempo sin sleep."""
     for f in files:
         is_stable(f)
 
@@ -182,9 +189,8 @@ def list_ready_files(subdir_path):
 # ---------------------------------------------------------------------------
 # Deteccion de duplicados por transferencia cortada (DSC_0818.JPG /
 # DSC_0818-1.JPG). La camara agrega el sufijo "-N" cuando reintenta subir un
-# archivo cuyo nombre ya existe en el servidor (version truncada por un
-# corte de WiFi a mitad de subida). Nos quedamos con la version mas grande
-# (la que llego completa) y mandamos la otra a cuarentena para revision.
+# archivo cuyo nombre ya existe en el servidor. Nos quedamos con la version
+# mas grande (la que llego completa) y mandamos la otra a cuarentena.
 # ---------------------------------------------------------------------------
 
 _DUP_SUFFIX_RE = re.compile(r"^(.*)-(\d+)$")
@@ -201,8 +207,7 @@ def _duplicate_key(path):
 
 def quarantine_file(subdir_name, path):
     """Mueve un archivo sospechoso de transferencia incompleta a
-    QUARANTINE_DIR/subdir_name/, en vez de borrarlo (por si hace falta
-    revisarlo despues)."""
+    QUARANTINE_DIR/subdir_name/, en vez de borrarlo."""
     try:
         qdir = os.path.join(QUARANTINE_DIR, subdir_name)
         os.makedirs(qdir, exist_ok=True)
@@ -227,10 +232,9 @@ def resolve_duplicates(subdir_name, files):
     grupo con mas de un archivo:
       - si TODOS ya estan estables (subida terminada), se queda con el de
         mayor tamano y manda el resto a cuarentena.
-      - si alguno todavia se esta subiendo, no decide nada esta vuelta (evita
-        comparar una version truncada contra otra que aun no termino) y
-        tampoco cuenta ninguno de ese grupo para el lote todavia.
-    Devuelve la lista de archivos que siguen "en juego" para el batch."""
+      - si alguno todavia se esta subiendo, no decide nada en esta vuelta y
+        tampoco cuenta ninguno de ese grupo todavia.
+    Devuelve la lista de archivos que siguen en juego."""
     groups = {}
     for f in files:
         groups.setdefault(_duplicate_key(f), []).append(f)
@@ -242,8 +246,7 @@ def resolve_duplicates(subdir_name, files):
             continue
 
         if not all(is_stable(f) for f in group):
-            # todavia hay alguna version subiendo: no se cuenta este grupo
-            # para el trigger de cantidad/tiempo todavia
+            # todavia hay alguna version subiendo
             continue
 
         try:
@@ -271,16 +274,13 @@ def resolve_duplicates(subdir_name, files):
 
 def is_corrupt_image(path):
     """Intenta decodificar la imagen completa (no solo verify()). Devuelve
-    True si esta truncada/corrupta. Solo aplica a formatos que Pillow puede
-    abrir (PIL_EXTENSIONS); para RAW u otros no validamos (Pillow no los
-    puede leer de entrada)."""
+    True si esta truncada/corrupta. Solo aplica a formatos PIL_EXTENSIONS."""
     ext = os.path.splitext(path)[1].lower()
     if ext not in PIL_EXTENSIONS:
         return False
     try:
         with Image.open(path) as img:
             img.verify()
-        # verify() invalida el objeto Image; hay que reabrirlo para decodificar
         with Image.open(path) as img2:
             img2.load()
         return False
@@ -289,9 +289,8 @@ def is_corrupt_image(path):
 
 
 def is_from_today(path):
-    """True si la fecha de modificacion del archivo es la de HOY (fecha real
-    del servidor al momento de chequear). Si no se puede determinar, se
-    asume True para no borrar por error."""
+    """True si la fecha de modificacion del archivo es la de HOY. Si no se
+    puede determinar, se asume True para no borrar por error."""
     try:
         mtime = os.path.getmtime(path)
     except FileNotFoundError:
@@ -300,12 +299,8 @@ def is_from_today(path):
 
 
 def cleanup_invalid_files(subdir_name, files):
-    """Para archivos YA ESTABLES: borra los que esten corruptos/truncados, y
-    los que no sean de HOY (restos de una sesion anterior que nunca se
-    procesaron). Los archivos que todavia se estan subiendo se dejan pasar
-    sin tocar (no tiene sentido validar un archivo a medio escribir).
-    Devuelve la lista de archivos que pasaron ambos checks (o que todavia
-    estan subiendo, para que sigan su curso normal)."""
+    """Para archivos YA ESTABLES: borra los corruptos y los que no sean de HOY.
+    Los archivos que todavia se estan subiendo se dejan pasar sin tocar."""
     valid = []
     for f in files:
         if not is_stable(f):
@@ -350,21 +345,129 @@ def cleanup_invalid_files(subdir_name, files):
 
 
 # ---------------------------------------------------------------------------
-# Resolucion del directorio destino con la regla "HHmm Hs" + colision
+# Gestion de carpetas horarias y numeracion correlativa
 # ---------------------------------------------------------------------------
 
+_HOUR_FOLDER_RE = re.compile(r"^\d{4}\s+[Hh][Ss]$")
 
-def resolve_dest_dir(dst_base, subdir_name, start_dt=None):
-    """Devuelve un path DST_DIR/yyyy-mm-dd/subdir_name/HHmm Hs/ que no exista
-    todavia. Si ya existe, prueba sumando 1 minuto (ajustando la fecha si
-    cruza medianoche) hasta encontrar uno libre."""
-    dt = start_dt or datetime.now()
+
+def is_main_photo(filename):
+    """True si el archivo es una foto principal numerada (ej: 001.jpg, 0001.jpg, 0087.cr2)
+    y no una miniatura o version visual (_#T, _#V)."""
+    name, ext = os.path.splitext(filename)
+    if ext.lower() not in ALL_EXTENSIONS:
+        return False
+    return name.isdigit()
+
+
+def inspect_folder(folder_path):
+    """Devuelve (count, max_seq, last_mtime) para las fotos principales
+    en una carpeta horaria dada."""
+    count = 0
+    max_seq = 0
+    last_mtime = 0.0
+    try:
+        for fname in os.listdir(folder_path):
+            if is_main_photo(fname):
+                full_path = os.path.join(folder_path, fname)
+                if os.path.isfile(full_path):
+                    count += 1
+                    name, _ = os.path.splitext(fname)
+                    val = int(name)
+                    if val > max_seq:
+                        max_seq = val
+                    mtime = os.path.getmtime(full_path)
+                    if mtime > last_mtime:
+                        last_mtime = mtime
+    except OSError:
+        pass
+    return count, max_seq, last_mtime
+
+
+def get_hour_folders(day_dir):
+    """Lista y ordena alfabeticamente/cronologicamente las carpetas horarias (HHmm Hs)."""
+    try:
+        return sorted(
+            d
+            for d in os.listdir(day_dir)
+            if os.path.isdir(os.path.join(day_dir, d)) and _HOUR_FOLDER_RE.match(d)
+        )
+    except FileNotFoundError:
+        return []
+
+
+def get_next_seq(day_dir, hour_folders):
+    """Devuelve el siguiente numero de secuencia correlativo para el dia de hoy,
+    revisando las carpetas horarias de la mas reciente a la mas antigua."""
+    for folder_name in reversed(hour_folders):
+        folder_path = os.path.join(day_dir, folder_name)
+        _, max_seq, _ = inspect_folder(folder_path)
+        if max_seq > 0:
+            return max_seq + 1
+    return 1
+
+
+def resolve_dest_folder(dst_base, subdir_name, max_count, timeout_min=0):
+    """Determina la carpeta destino activa para la siguiente foto segun:
+    a) Si la ultima carpeta tiene < MAX_COUNT y no expiro por inactividad, se usa esa.
+    b) Si tiene >= MAX_COUNT o expiro por inactividad, se crea una nueva con la hora actual.
+    c) Si todavia no existe ninguna carpeta hoy, se crea con la hora actual.
+
+    Retorna (target_dir, day_dir, hour_folders)."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    day_dir = os.path.join(dst_base, date_str, subdir_name)
+    os.makedirs(day_dir, exist_ok=True)
+
+    hour_folders = get_hour_folders(day_dir)
+
+    # Caso c: primera carpeta del dia
+    if not hour_folders:
+        time_str = datetime.now().strftime("%H%M") + " Hs"
+        target_dir = os.path.join(day_dir, time_str)
+        os.makedirs(target_dir, exist_ok=True)
+        return target_dir, day_dir, [time_str]
+
+    last_folder = hour_folders[-1]
+    last_folder_path = os.path.join(day_dir, last_folder)
+    count, _, last_mtime = inspect_folder(last_folder_path)
+
+    # Chequeo de inactividad
+    is_timed_out = False
+    if timeout_min > 0 and count > 0 and last_mtime > 0:
+        elapsed_min = (time.time() - last_mtime) / 60.0
+        if elapsed_min >= timeout_min:
+            is_timed_out = True
+            logging.info(
+                f"[{subdir_name}] Inactividad de {elapsed_min:.1f} min >= {timeout_min} min "
+                f"en carpeta {last_folder}. Se creara una nueva carpeta horaria."
+            )
+
+    # Caso a: todavia entra y no expiro por inactividad
+    if count < max_count and not is_timed_out:
+        return last_folder_path, day_dir, hour_folders
+
+    # Caso b: carpeta llena o supero tiempo -> crear nueva carpeta con hora actual
+    dt = datetime.now()
     while True:
-        date_str = dt.strftime("%Y-%m-%d")
-        time_str = dt.strftime("%H%M") + " Hs"
-        candidate = os.path.join(dst_base, date_str, subdir_name, time_str)
-        if not os.path.exists(candidate):
-            return candidate
+        candidate_name = dt.strftime("%H%M") + " Hs"
+        candidate_path = os.path.join(day_dir, candidate_name)
+        if not os.path.exists(candidate_path):
+            os.makedirs(candidate_path, exist_ok=True)
+            if candidate_name not in hour_folders:
+                hour_folders.append(candidate_name)
+                hour_folders.sort()
+            return candidate_path, day_dir, hour_folders
+
+        # Si ya existe, verificar si tiene espacio y no esta expirada
+        cand_count, _, cand_mtime = inspect_folder(candidate_path)
+        cand_timed_out = False
+        if timeout_min > 0 and cand_count > 0 and cand_mtime > 0:
+            if (time.time() - cand_mtime) / 60.0 >= timeout_min:
+                cand_timed_out = True
+
+        if cand_count < max_count and not cand_timed_out:
+            return candidate_path, day_dir, hour_folders
+
         dt += timedelta(minutes=1)
 
 
@@ -407,58 +510,32 @@ def process_photo_raw(src_path, dest_dir, seq_str):
     )
 
 
-def process_batch(subdir_name, files, batch_start_ts=None):
-    if not files:
-        return
-
-    # Defensa extra: si por algun motivo ninguno de los archivos pasados esta
-    # realmente estable en este momento, no crear ninguna carpeta.
-    if not any(is_stable(f) for f in files):
-        logging.warning(
-            f"[{subdir_name}] process_batch llamado pero ningun archivo esta "
-            f"estable; se aborta sin crear carpeta"
-        )
-        return
-
-    # Usa la hora de la primera foto detectada (inicio del lote), no la hora
-    # en que se dispara el procesamiento (que puede ser varios minutos despues).
-    start_dt = datetime.fromtimestamp(batch_start_ts) if batch_start_ts else None
-
-    dest_dir = resolve_dest_dir(DST_DIR, subdir_name, start_dt=start_dt)
+def process_single_photo(subdir_name, src_path):
+    """Procesa una unica foto estable, resolviendo la carpeta destino y
+    su numero correlativo."""
     try:
-        os.makedirs(dest_dir, exist_ok=True)
-    except OSError as e:
-        logging.error(f"No se pudo crear directorio destino {dest_dir}: {e}")
-        return
+        dest_dir, day_dir, hour_folders = resolve_dest_folder(
+            DST_DIR, subdir_name, MAX_COUNT, timeout_min=FOLDER_TIMEOUT_MIN
+        )
+        seq = get_next_seq(day_dir, hour_folders)
+        seq_str = f"{seq:0{FILENAME_DIGITS}d}"
 
-    logging.info(f"[{subdir_name}] Procesando lote de {len(files)} fotos -> {dest_dir}")
+        ext = os.path.splitext(src_path)[1].lower()
 
-    seq = 1
-    procesadas = 0
-    for f in files:
-        if not is_stable(f):
-            logging.info(f"[{subdir_name}] Archivo aun en escritura, se pospone: {f}")
-            continue
+        if ext in PIL_EXTENSIONS:
+            process_photo_pil(src_path, dest_dir, seq_str)
+            os.remove(src_path)
+        else:
+            process_photo_raw(src_path, dest_dir, seq_str)
 
-        seq_str = f"{seq:03d}"
-        ext = os.path.splitext(f)[1].lower()
-
-        try:
-            if ext in PIL_EXTENSIONS:
-                process_photo_pil(f, dest_dir, seq_str)
-                os.remove(f)
-            else:
-                process_photo_raw(f, dest_dir, seq_str)
-
-            logging.info(f"[{subdir_name}] {os.path.basename(f)} -> {seq_str}")
-            seq += 1
-            procesadas += 1
-        except Exception as e:
-            logging.error(f"[{subdir_name}] Error procesando {f}: {e}")
-
-    logging.info(
-        f"[{subdir_name}] Lote finalizado: {procesadas}/{len(files)} fotos procesadas"
-    )
+        logging.info(
+            f"[{subdir_name}] {os.path.basename(src_path)} -> {seq_str} "
+            f"en {os.path.basename(dest_dir)}"
+        )
+        return True
+    except Exception as e:
+        logging.error(f"[{subdir_name}] Error procesando {src_path}: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -469,11 +546,12 @@ def process_batch(subdir_name, files, batch_start_ts=None):
 def main():
     logging.info("=== photo_batcher iniciado ===")
     logging.info(f"SRC_DIR={SRC_DIR}  DST_DIR={DST_DIR}")
-    logging.info(f"TIME_LIMIT_MIN={TIME_LIMIT_MIN}  MAX_COUNT={MAX_COUNT}")
+    logging.info(
+        f"MAX_COUNT={MAX_COUNT}  FOLDER_TIMEOUT_MIN={FOLDER_TIMEOUT_MIN}  "
+        f"FILENAME_DIGITS={FILENAME_DIGITS}"
+    )
     logging.info(f"THUMB_SIZE={THUMB_SIZE}  VISUAL_SIZE={VISUAL_SIZE}")
     logging.info(f"STABLE_WAIT_SEC={STABLE_WAIT_SEC} (sin bloqueo)")
-
-    batch_start = {}
 
     while True:
         try:
@@ -489,57 +567,10 @@ def main():
                 files = resolve_duplicates(subdir_name, raw_files)
                 files = cleanup_invalid_files(subdir_name, files)
 
-                # Solo los archivos YA ESTABLES cuentan para el trigger y se
-                # pasan a process_batch. Uno que siga subiendo no debe hacer
-                # que se cree una carpeta vacia si se cumple el tiempo limite.
+                # Las fotos estables se procesan de inmediato
                 stable_files = [f for f in files if is_stable(f)]
-
-                if files:
-                    if subdir_name not in batch_start:
-                        batch_start[subdir_name] = time.time()
-                        logging.info(
-                            f"[{subdir_name}] Nuevo lote detectado, "
-                            f"primera foto: {os.path.basename(files[0])}"
-                        )
-
-                    elapsed_min = (time.time() - batch_start[subdir_name]) / 60.0
-
-                    if len(stable_files) >= MAX_COUNT:
-                        logging.info(
-                            f"[{subdir_name}] Trigger por cantidad: "
-                            f"{len(stable_files)} >= {MAX_COUNT}"
-                        )
-                        process_batch(
-                            subdir_name,
-                            stable_files,
-                            batch_start_ts=batch_start[subdir_name],
-                        )
-                        batch_start.pop(subdir_name, None)
-                    elif elapsed_min >= TIME_LIMIT_MIN:
-                        if stable_files:
-                            logging.info(
-                                f"[{subdir_name}] Trigger por tiempo: "
-                                f"{elapsed_min:.1f} min >= {TIME_LIMIT_MIN} min"
-                            )
-                            process_batch(
-                                subdir_name,
-                                stable_files,
-                                batch_start_ts=batch_start[subdir_name],
-                            )
-                        else:
-                            logging.warning(
-                                f"[{subdir_name}] Pasaron {elapsed_min:.1f} min pero "
-                                f"ningun archivo termino de subir todavia (posible "
-                                f"transferencia estancada); no se crea carpeta vacia, "
-                                f"se reinicia la espera"
-                            )
-                        batch_start.pop(subdir_name, None)
-                else:
-                    batch_start.pop(subdir_name, None)
-
-            for name in list(batch_start.keys()):
-                if name not in subdirs:
-                    batch_start.pop(name, None)
+                for f in stable_files:
+                    process_single_photo(subdir_name, f)
 
         except Exception as e:
             logging.error(f"Error en loop principal: {e}")

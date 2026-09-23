@@ -5,18 +5,21 @@
 Editar `/etc/fstab` y agregar las entradas correspondientes al protocolo de tu NAS.
 
 ### Si el NAS expone NFS
+
 ```
 192.168.1.50:/volumen1/origen   /mnt/nas/origen   nfs   defaults,_netdev,noatime  0  0
 192.168.1.50:/volumen1/destino  /mnt/nas/destino  nfs   defaults,_netdev,noatime  0  0
 ```
 
 ### Si el NAS expone CIFS/SMB
+
 ```
 //192.168.1.50/origen   /mnt/nas/origen   cifs  credentials=/etc/nas-credentials,uid=tu_usuario,gid=tu_usuario,_netdev  0  0
 //192.168.1.50/destino  /mnt/nas/destino  cifs  credentials=/etc/nas-credentials,uid=tu_usuario,gid=tu_usuario,_netdev  0  0
 ```
 
 Crear el archivo de credenciales (si usás CIFS) y protegerlo:
+
 ```bash
 sudo nano /etc/nas-credentials
 # contenido:
@@ -27,6 +30,7 @@ sudo chmod 600 /etc/nas-credentials
 ```
 
 Crear los puntos de montaje y montar:
+
 ```bash
 sudo mkdir -p /mnt/nas/origen /mnt/nas/destino
 sudo mount -a
@@ -46,13 +50,17 @@ pip install Pillow --break-system-packages
 ```
 
 Editar las variables de configuración al inicio de `photo_batcher.py`:
+
 - `SRC_DIR` (debe contener subdirectorios, uno por cada origen: `SRC_DIR/camara1`, `SRC_DIR/camara2`, etc.)
 - `DST_DIR`
-- `TIME_LIMIT_MIN`, `MAX_COUNT` (se evalúan de forma independiente por cada subdirectorio)
+- `MAX_COUNT` (capacidad máxima de fotos por carpeta horaria)
+- `FOLDER_TIMEOUT_MIN` (minutos de inactividad entre fotos para crear una nueva carpeta horaria; `0` para deshabilitar)
+- `FILENAME_DIGITS` (cantidad de dígitos del número de archivo, ej. `4` -> `0001.jpg`)
 - `THUMB_SIZE` / `VISUAL_SIZE`
 - `PIL_EXTENSIONS` / `OTHER_EXTENSIONS` según los formatos de tu cámara
 
 ### Estructura de origen esperada
+
 ```
 SRC_DIR/
   camara1/
@@ -63,20 +71,22 @@ SRC_DIR/
 ```
 
 ### Estructura de destino generada
-Cada subdirectorio se procesa de forma independiente. Al dispararse el lote de
-`camara1`, se crea:
+
+Las fotos se procesan y suben inmediatamente al detectarse estables e íntegras en el origen:
+
 ```
 DST_DIR/
   2026-07-25/
     camara1/
       1258 Hs/
-        001.jpg      001_#T.jpg (thumb)   001_#V.jpg (visual)
-        002.jpg      002_#T.jpg           002_#V.jpg
+        0001.jpg      0001_#T.jpg (thumb)   0001_#V.jpg (visual)
+        0002.jpg      0002_#T.jpg           0002_#V.jpg
 ```
-Si `1258 Hs` ya existe (por ejemplo porque hubo otro lote en el mismo minuto),
-se prueba `1259 Hs`, `1300 Hs`, etc. hasta encontrar uno libre.
+
+Al llenarse la carpeta con `MAX_COUNT` fotos (o transcurrir `FOLDER_TIMEOUT_MIN` minutos de inactividad), se crea automáticamente una nueva carpeta horaria (ej: `1340 Hs`) manteniendo la numeración correlativa global del día (`0101.jpg`, etc.).
 
 ### Nota sobre formatos RAW
+
 Los formatos en `OTHER_EXTENSIONS` (cr2, nef, raw, arw, dng) no pueden ser
 abiertos por Pillow, así que **no se les genera thumbnail ni visual**: solo
 se renombran y mueven (ej. `001.cr2`). Si necesitás procesar RAW con
@@ -125,19 +135,23 @@ que usa `photo_batcher.py`.
 ### Desde cada PC Windows
 
 Abrir un navegador (Chrome/Edge) apuntando a:
+
 ```
 http://<ip-del-ubuntu>:8080/camara/camara1
 ```
+
 (reemplazando `camara1` por el nombre del subdirectorio de esa cámara).
 
 La página se auto-refresca sola cada pocos segundos, muestra miniaturas de
 las fotos pendientes (aún no movidas por `photo_batcher.py`), y un indicador
 de color:
+
 - 🟢 **verde**: llegó una foto hace poco
 - 🟠 **naranja**: hace más de `STALE_WARN_MIN` minutos sin novedades
 - 🔴 **rojo**: hace más de `STALE_ALERT_MIN` minutos sin novedades (revisar la cámara)
 
 Para pantalla completa tipo kiosco en Windows con Edge:
+
 ```
 msedge.exe --kiosk "http://<ip-del-ubuntu>:8080/camara/camara1" --edge-kiosk-type=fullscreen
 ```
@@ -148,6 +162,7 @@ convendría ponerlo detrás de un proxy con autenticación o restringir el
 puerto 8080 por firewall a las IPs de esas PCs.
 
 ## Notas
+
 - El script chequea que cada archivo tenga tamaño estable antes de moverlo, para no
   mover una foto que todavía se está copiando al origen.
 - Si el mount del NAS se cae, el script logea el error y sigue reintentando en el
