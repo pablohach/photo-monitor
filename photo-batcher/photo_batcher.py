@@ -81,6 +81,13 @@ THUMB_SIZE = 140  # lado maximo del thumbnail (_#T)
 VISUAL_SIZE = 1200  # lado maximo de la version visual (_#V)
 JPEG_QUALITY = 92
 
+# Mapeo de subdirectorios de origen a destino (origen -> destino).
+# Util si la camara/SFTP no soporta caracteres especiales (ej: "MUNECO" -> "MUÑECO").
+# Si un directorio no esta en el mapeo, se usa el mismo nombre de origen en destino.
+SUBDIR_MAP = {
+    "MUNECO": "MUÑECO",
+}
+
 # Extensiones que Pillow puede abrir y re-procesar (thumb + visual + rotacion)
 PIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 # Extensiones RAW u otras que se mueven renombradas sin procesar
@@ -205,11 +212,18 @@ def _duplicate_key(path):
     return (base_key.lower(), ext.lower())
 
 
+def get_dest_subdir_name(src_subdir_name):
+    """Devuelve el nombre del subdirectorio en destino segun SUBDIR_MAP,
+    o el mismo nombre si no esta mapeado."""
+    return SUBDIR_MAP.get(src_subdir_name, src_subdir_name)
+
+
 def quarantine_file(subdir_name, path):
     """Mueve un archivo sospechoso de transferencia incompleta a
-    QUARANTINE_DIR/subdir_name/, en vez de borrarlo."""
+    QUARANTINE_DIR/dst_subdir/, en vez de borrarlo."""
     try:
-        qdir = os.path.join(QUARANTINE_DIR, subdir_name)
+        dst_subdir = get_dest_subdir_name(subdir_name)
+        qdir = os.path.join(QUARANTINE_DIR, dst_subdir)
         os.makedirs(qdir, exist_ok=True)
 
         name = os.path.basename(path)
@@ -415,7 +429,8 @@ def resolve_dest_folder(dst_base, subdir_name, max_count, timeout_min=0):
 
     Retorna (target_dir, day_dir, hour_folders)."""
     date_str = datetime.now().strftime("%Y-%m-%d")
-    day_dir = os.path.join(dst_base, date_str, subdir_name)
+    dst_subdir = get_dest_subdir_name(subdir_name)
+    day_dir = os.path.join(dst_base, date_str, dst_subdir)
     os.makedirs(day_dir, exist_ok=True)
 
     hour_folders = get_hour_folders(day_dir)
@@ -546,6 +561,8 @@ def process_single_photo(subdir_name, src_path):
 def main():
     logging.info("=== photo_batcher iniciado ===")
     logging.info(f"SRC_DIR={SRC_DIR}  DST_DIR={DST_DIR}")
+    if SUBDIR_MAP:
+        logging.info(f"SUBDIR_MAP={SUBDIR_MAP}")
     logging.info(
         f"MAX_COUNT={MAX_COUNT}  FOLDER_TIMEOUT_MIN={FOLDER_TIMEOUT_MIN}  "
         f"FILENAME_DIGITS={FILENAME_DIGITS}"

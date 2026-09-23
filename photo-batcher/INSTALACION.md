@@ -53,6 +53,7 @@ Editar las variables de configuración al inicio de `photo_batcher.py`:
 
 - `SRC_DIR` (debe contener subdirectorios, uno por cada origen: `SRC_DIR/camara1`, `SRC_DIR/camara2`, etc.)
 - `DST_DIR`
+- `SUBDIR_MAP` (mapeo de nombres origen -> destino, ej. `{"MUNECO": "MUÑECO"}` para cámaras sin soporte de 'Ñ')
 - `MAX_COUNT` (capacidad máxima de fotos por carpeta horaria)
 - `FOLDER_TIMEOUT_MIN` (minutos de inactividad entre fotos para crear una nueva carpeta horaria; `0` para deshabilitar)
 - `FILENAME_DIGITS` (cantidad de dígitos del número de archivo, ej. `4` -> `0001.jpg`)
