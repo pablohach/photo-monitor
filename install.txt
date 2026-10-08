@@ -41,7 +41,7 @@ sudo apt update
 sudo apt install cifs-utils
 
 
-Montar a mano para probar, despues ira persostente en fstab
+Montar a mano para probar, despues irá persistente en fstab
 sudo mount -t cifs "//192.168.1.30/piedras/fotos/descarga" /mnt/nas/fotos/destino \
   -o username=usuario,password=oletna2021,uid=$(id -u),gid=$(id -g),vers=3.0
 
@@ -79,11 +79,60 @@ sudo nano /etc/fstab
 
 
 Aplicar y probar
+sudo chattr +i /mnt/nas/fotos/origen /mnt/nas/fotos/destino
 sudo mount -a
 
 mount | grep destino
 touch /mnt/nas/fotos/destino/test.txt && rm /mnt/nas/fotos/destino/test.txt
 
+
+_______________________________________
+
+Creo timer que intente montar solamente los dos CIFS del NAS, y que además haga que photo-batcher se inicie/reinicie cuando los mounts estén disponibles.
+(porque si arranca ubuntu y el NAS esta apagado, no se montan)
+
+Instalacion timer:
+
+sudo cp mount_nas.sh /opt/photo_batcher/
+sudo chmod +x /opt/photo_batcher/mount_nas.sh
+sudo cp nas-mount-retry.service nas-mount-retry.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nas-mount-retry.timer
+systemctl list-timers nas-mount-retry.timer
+
+Así:
+
+NAS apagado → sigue intentando.
+NAS encendido → monta.
+photo-batcher detenido → lo inicia.
+photo-batcher ya funcionando → no lo toca.
+Cada 5 minutos → vuelve a comprobar.
+
+Para probarlo, simulá el NAS caído:
+sudo systemctl stop photo-batcher
+sudo umount /mnt/nas/fotos/origen /mnt/nas/fotos/destino
+sudo systemctl start nas-mount-retry.service
+journalctl -u nas-mount-retry.service -n 20 --no-pager
+systemctl status photo-batcher
+
+Deberías ver que monta los dos y arranca el servicio.
+
+
+
+Otras tres mejoras recomendadas
+
+fstab. Agregá nofail,x-systemd.mount-timeout=30 a las opciones de las dos líneas CIFS, y después sudo systemctl daemon-reload. Con nofail, un NAS apagado nunca puede frenar el arranque de Ubuntu. Con el timeout, el intento del boot se rinde a los 30 segundos y no a los 90 que usa por defecto.
+
+Proteger el disco local. Mientras los mounts no estén activos, /mnt/nas/fotos/destino es una carpeta común en el disco de Ubuntu. Si el servicio ya estaba corriendo y destino se desmonta, photo_batcher.py escribiría las fotos procesadas en el disco local, escondidas debajo del mount, y borraría los originales del NAS. Se evita con un solo comando, hecho con los mounts desmontados:
+
+bash
+sudo umount /mnt/nas/fotos/origen /mnt/nas/fotos/destino
+sudo chattr +i /mnt/nas/fotos/origen /mnt/nas/fotos/destino
+sudo mount -a
+
+Con eso, escribir en la carpeta sin montar da "Operation not permitted". Cuando el mount está activo no molesta. Si querés una defensa dentro del script, puedo agregarle a photo_batcher.py un chequeo con os.path.ismount() que saltee el ciclo cuando falte alguno de los dos mounts.
+
+****************************************************************************************
 
 
 

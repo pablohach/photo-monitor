@@ -1,0 +1,10 @@
+[Unit]
+Description=Retry NAS CIFS mounts and start photo-batcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/photo_batcher/mount_nas.sh
+# Tope de seguridad: 2 mounts x (10s + 60s + 10s) = 160s en el peor caso
+TimeoutStartSec=200

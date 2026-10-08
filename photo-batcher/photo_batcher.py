@@ -48,6 +48,13 @@ LIMPIEZA POR FECHA:
 ESTABILIDAD SIN BLOQUEO:
   is_stable() no usa time.sleep(). Trackea el tamano de cada archivo en cada
   vuelta del loop principal y calcula el tiempo transcurrido sin cambios.
+
+CHEQUEO DE MOUNTS (REQUIRE_MOUNTS):
+  Antes de cada vuelta, y antes de procesar cada foto, se verifica con
+  os.path.ismount() que SRC_DIR y DST_DIR esten realmente montados. Si falta
+  alguno (NAS apagado, mount caido) se pausa el procesamiento y se retoma solo
+  cuando vuelven. Evita que las fotos se guarden en el disco local de Ubuntu,
+  debajo del punto de montaje, mientras los originales se borran del NAS.
 """
 
 import os
@@ -98,7 +105,17 @@ ALL_EXTENSIONS = PIL_EXTENSIONS | OTHER_EXTENSIONS
 # Directorio donde se mueven los archivos "perdedores" cuando se detectan
 # duplicados con sufijo -N (ej: DSC_0818.JPG y DSC_0818-1.JPG), tipicos de
 # una transferencia SFTP cortada y reintentada por la camara.
-QUARANTINE_DIR = "/mnt/nas/fotos/sospechosos"
+QUARANTINE_DIR = "/opt/photo_batcher/sospechosos"
+
+# Seguridad de mounts: SRC_DIR y DST_DIR son montajes de red (CIFS). Si el
+# mount no esta activo, la ruta es una carpeta comun en el disco local de
+# Ubuntu, y las fotos procesadas se guardarian ahi (escondidas debajo del
+# mount) mientras los originales se borran del NAS. Con REQUIRE_MOUNTS = True
+# el script verifica con os.path.ismount() que ambos esten realmente montados
+# y, si no, pausa el procesamiento hasta que vuelvan.
+# Poner en False solo para pruebas con carpetas locales (sin NAS).
+REQUIRE_MOUNTS = True
+MOUNT_WARN_INTERVAL_SEC = 300  # cada cuanto repetir el aviso en el log mientras falte un mount
 
 LOG_FILE = "/opt/photo_batcher/logs/photo_batcher.log"
 # ---------------------------------------------------------------------------
@@ -116,6 +133,43 @@ logging.basicConfig(
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
 logging.getLogger().addHandler(console)
+
+
+# ---------------------------------------------------------------------------
+# Chequeo de mounts (evita escribir en el disco local si el NAS no esta montado)
+# ---------------------------------------------------------------------------
+
+_mounts_state_ok = True  # ultimo estado conocido, para loguear solo los cambios
+_last_mount_warn = 0.0  # timestamp del ultimo aviso, para no repetirlo cada poll
+
+
+def mounts_ok():
+    """True si SRC_DIR y DST_DIR estan realmente montados (o si REQUIRE_MOUNTS
+    esta desactivado). Si falta alguno, loguea un error (repetido como mucho
+    cada MOUNT_WARN_INTERVAL_SEC) y devuelve False. Cuando vuelven, loguea
+    un aviso de recuperacion."""
+    global _mounts_state_ok, _last_mount_warn
+
+    if not REQUIRE_MOUNTS:
+        return True
+
+    missing = [p for p in (SRC_DIR, DST_DIR) if not os.path.ismount(p)]
+    now = time.time()
+
+    if missing:
+        if _mounts_state_ok or (now - _last_mount_warn) >= MOUNT_WARN_INTERVAL_SEC:
+            logging.error(
+                f"Mount(s) no disponible(s): {', '.join(missing)}. Se pausa el "
+                f"procesamiento hasta que vuelvan (NAS apagado o inaccesible?)"
+            )
+            _last_mount_warn = now
+        _mounts_state_ok = False
+        return False
+
+    if not _mounts_state_ok:
+        logging.info("Mounts disponibles de nuevo, se reanuda el procesamiento")
+        _mounts_state_ok = True
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -569,9 +623,14 @@ def main():
     )
     logging.info(f"THUMB_SIZE={THUMB_SIZE}  VISUAL_SIZE={VISUAL_SIZE}")
     logging.info(f"STABLE_WAIT_SEC={STABLE_WAIT_SEC} (sin bloqueo)")
+    logging.info(f"REQUIRE_MOUNTS={REQUIRE_MOUNTS}")
 
     while True:
         try:
+            if not mounts_ok():
+                time.sleep(POLL_INTERVAL_SEC)
+                continue
+
             subdirs = list_subdirs(SRC_DIR)
 
             for subdir_name in subdirs:
@@ -587,6 +646,11 @@ def main():
                 # Las fotos estables se procesan de inmediato
                 stable_files = [f for f in files if is_stable(f)]
                 for f in stable_files:
+                    # Re-chequeo por foto: si el mount se cae a mitad de un
+                    # lote grande, se corta enseguida en vez de seguir
+                    # escribiendo en el disco local.
+                    if not mounts_ok():
+                        break
                     process_single_photo(subdir_name, f)
 
         except Exception as e:
